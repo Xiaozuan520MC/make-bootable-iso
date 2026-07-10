@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # make-bootable-iso.sh - 将编译好的Linux内核打包为ISO并用QEMU启动
-#                        (自动生成 BusyBox initramfs 支持)
+#                        (支持虚拟硬盘 + 自动生成 BusyBox initramfs)
 # =============================================================================
 # 用法:
 #   ./make-bootable-iso.sh                    # 使用默认路径，自动生成 initramfs
@@ -9,6 +9,10 @@
 #   ./make-bootable-iso.sh --initrd <路径>    # 指定 initramfs (禁用自动生成)
 #   ./make-bootable-iso.sh --no-auto-initrd   # 禁用自动生成 initramfs
 #   ./make-bootable-iso.sh --run-only         # 仅运行已有的ISO
+#   ./make-bootable-iso.sh --graphic          # 使用图形窗口 (默认)
+#   ./make-bootable-iso.sh --serial           # 使用串口控制台
+#   ./make-bootable-iso.sh --disk <大小>      # 创建/使用虚拟硬盘 (如: 5G)
+#   ./make-bootable-iso.sh --disk-only        # 仅创建硬盘，不启动QEMU
 #   ./make-bootable-iso.sh --help             # 显示帮助
 #
 # 依赖:
@@ -17,6 +21,7 @@
 #   - qemu-system-x86_64
 #   - mtools (UEFI 模式需要: sudo apt install mtools dosfstools)
 #   - busybox-static, cpio (自动生成 initramfs 时需要)
+#   - qemu-img (创建虚拟硬盘)
 # =============================================================================
 
 set -e
@@ -63,10 +68,17 @@ RUN_ONLY=false
 NO_QEMU=false                       # 只生成ISO，不启动QEMU
 NO_KVM=false                        # 不使用KVM
 USE_EFI=false                       # 使用UEFI启动
-SERIAL_CONSOLE=true                 # 使用串口控制台
+SERIAL_CONSOLE=true                # 默认使用图形窗口
 DEBUG=false                         # 调试模式
 AUTO_INITRD=true                    # 自动生成 BusyBox initramfs (默认开启)
 AUTO_INITRD_FILE=""                 # 自动生成的 initramfs 文件路径
+
+# ---- 硬盘相关配置 ----
+USE_DISK=false                      # 是否使用虚拟硬盘
+DISK_SIZE="1G"                      # 硬盘大小
+DISK_FILE="${KERNEL_SRC}/disk.qcow2" # 硬盘文件路径
+DISK_ONLY=false                     # 仅创建硬盘
+DISK_FORMAT="qcow2"                 # 硬盘格式
 
 # ---- 解析命令行参数 ----
 usage() {
@@ -85,14 +97,21 @@ usage() {
     echo "  -n, --no-qemu            仅生成 ISO，不启动 QEMU"
     echo "  -f, --force              强制覆盖已有 ISO"
     echo "  -d, --debug              调试模式 (显示更多信息)"
+    echo "  -g, --graphic            使用图形窗口启动 QEMU (默认)"
+    echo "      --serial             使用串口控制台启动 QEMU"
     echo "      --no-auto-initrd     禁用自动生成 BusyBox initramfs"
+    echo "      --disk <大小>        创建/使用虚拟硬盘 (如: 5G, 10G)"
+    echo "      --disk-file <文件>   指定硬盘文件路径 (默认: disk.qcow2)"
+    echo "      --disk-only          仅创建硬盘，不启动 QEMU"
     echo "  -h, --help               显示此帮助"
     echo ""
     echo "示例:"
-    echo "  $0                        # 默认: 自动生成 BusyBox initramfs 并启动"
-    echo "  $0 -b ../mybzImage -i ../initrd.cpio -m 1G"
-    echo "  $0 -e -n                  # 生成 UEFI 启动的 ISO，不启动 QEMU"
-    echo "  $0 -r                     # 直接启动已有的 linux.iso"
+    echo "  $0                        # 默认: 图形窗口 + 自动生成 initramfs"
+    echo "  $0 --disk 5G              # 创建 5GB 虚拟硬盘并启动"
+    echo "  $0 --disk 10G --efi       # UEFI 模式 + 10GB 硬盘"
+    echo "  $0 -i myinitrd.cpio --disk 5G  # 使用自定义 initramfs"
+    echo "  $0 --disk-only 10G        # 仅创建 10GB 硬盘"
+    echo "  $0 -r --disk 5G           # 用已有 ISO + 硬盘启动"
     echo ""
     echo "依赖检查:"
     for cmd in xorriso qemu-system-x86_64; do
@@ -111,6 +130,11 @@ usage() {
         ok "找到 busybox 和 cpio (可用于自动生成 initramfs)"
     else
         warn "未找到 busybox 或 cpio (自动生成 initramfs 需要)"
+    fi
+    if command -v qemu-img &>/dev/null; then
+        ok "找到 qemu-img (可用于创建虚拟硬盘)"
+    else
+        warn "未找到 qemu-img (创建虚拟硬盘需要: sudo apt install qemu-utils)"
     fi
 }
 
@@ -140,8 +164,27 @@ while [ $# -gt 0 ]; do
             FORCE=true; shift ;;
         -d|--debug)
             DEBUG=true; shift ;;
+        -g|--graphic)
+            SERIAL_CONSOLE=false; shift ;;
+        --serial)
+            SERIAL_CONSOLE=true; shift ;;
         --no-auto-initrd)
             AUTO_INITRD=false; shift ;;
+        --disk)
+            USE_DISK=true
+            DISK_SIZE="$2"
+            shift 2 ;;
+        --disk-file)
+            DISK_FILE="$2"
+            shift 2 ;;
+        --disk-only)
+            DISK_ONLY=true
+            USE_DISK=true
+            if [ -n "$2" ] && [[ "$2" =~ ^[0-9]+[GgMm]$ ]]; then
+                DISK_SIZE="$2"
+                shift
+            fi
+            shift ;;
         -h|--help)
             usage; exit 0 ;;
         *)
@@ -149,6 +192,39 @@ while [ $# -gt 0 ]; do
             usage; exit 1 ;;
     esac
 done
+
+# =============================================================================
+# 阶段0: 创建虚拟硬盘 (如果需要)
+# =============================================================================
+if [ "$USE_DISK" = true ]; then
+    if ! command -v qemu-img &>/dev/null; then
+        error "qemu-img 未安装，请安装: sudo apt install qemu-utils"
+        exit 1
+    fi
+    
+    # 确保目录存在
+    DISK_DIR="$(dirname "$DISK_FILE")"
+    if [ ! -d "$DISK_DIR" ]; then
+        mkdir -p "$DISK_DIR"
+    fi
+    
+    if [ ! -f "$DISK_FILE" ]; then
+        info "创建虚拟硬盘: $DISK_FILE (大小: $DISK_SIZE)"
+        qemu-img create -f "$DISK_FORMAT" "$DISK_FILE" "$DISK_SIZE"
+        ok "虚拟硬盘创建成功"
+    else
+        DISK_ACTUAL_SIZE=$(qemu-img info "$DISK_FILE" --output=json | grep -o '"virtual-size": [0-9]*' | awk '{print $2}' | numfmt --to=iec 2>/dev/null || echo "未知")
+        ok "使用已有虚拟硬盘: $DISK_FILE ($DISK_ACTUAL_SIZE)"
+    fi
+    
+    # 如果仅创建硬盘，直接退出
+    if [ "$DISK_ONLY" = true ]; then
+        ok "硬盘创建完成: $DISK_FILE"
+        info "您可以手动启动:"
+        info "  qemu-system-x86_64 -cdrom $OUTPUT_ISO -drive file=$DISK_FILE,format=$DISK_FORMAT -m $QEMU_MEM"
+        exit 0
+    fi
+fi
 
 # =============================================================================
 # 阶段1: 检查依赖和输入文件
@@ -196,7 +272,7 @@ fi
 if [ "$DEP_MISSING" = true ]; then
     echo ""
     info "安装基础依赖:"
-    info "  sudo apt install xorriso grub-pc-bin grub-efi-amd64-bin qemu-system-x86 mtools dosfstools busybox-static cpio"
+    info "  sudo apt install xorriso grub-pc-bin grub-efi-amd64-bin qemu-system-x86 mtools dosfstools busybox-static cpio qemu-utils"
     exit 1
 fi
 ok "所有依赖已满足"
@@ -258,14 +334,11 @@ if [ "$goto_qemu" = false ]; then
             # 创建 init 脚本
             cat > "$BUSYBOX_DIR/init" << 'EOF'
 #!/bin/sh
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
 echo "=== BusyBox initramfs 启动成功 ==="
-echo "您现在可以执行命令，例如："
-echo "  ls /"
-echo "  cat /proc/cpuinfo"
-exec /bin/sh
+exec /bin/busybox sh
 EOF
             chmod +x "$BUSYBOX_DIR/init"
 
@@ -337,10 +410,21 @@ EOF
     CMDLINE=""
     if [ "$SERIAL_CONSOLE" = true ]; then
         CMDLINE="console=ttyS0,115200 earlyprintk=serial"
+    else
+        CMDLINE="console=tty0"
     fi
 
-    # 自动添加 root= 仅当 NO_INITRD 为 true 时（即没有 initramfs 且禁用了自动生成）
-    if [ "$NO_INITRD" = true ]; then
+    # ---- 如果使用硬盘，自动添加 root= 参数 ----
+    if [ "$USE_DISK" = true ] && [ -f "$DISK_FILE" ]; then
+        # 检查用户是否已指定 root=
+        if [ -n "$QEMU_CMDLINE" ] && echo "$QEMU_CMDLINE" | grep -q "\broot="; then
+            :  # 用户已指定
+        else
+            info "检测到虚拟硬盘，自动添加 root=/dev/sda1"
+            CMDLINE="$CMDLINE root=/dev/sda1"
+        fi
+    elif [ "$NO_INITRD" = true ]; then
+        # 没有 initramfs 且没有硬盘，尝试挂载 CD-ROM
         if [ -n "$QEMU_CMDLINE" ] && echo "$QEMU_CMDLINE" | grep -q "\broot="; then
             :  # 用户已指定
         else
@@ -349,6 +433,7 @@ EOF
             CMDLINE="$CMDLINE root=/dev/sr0"
         fi
     fi
+    
     # 添加用户自定义参数（可能覆盖 root）
     if [ -n "$QEMU_CMDLINE" ]; then
         CMDLINE="$CMDLINE $QEMU_CMDLINE"
@@ -582,8 +667,14 @@ if [ "$NO_QEMU" = true ]; then
     bold "═══════════ 完成 ═══════════"
     echo ""
     ok "ISO 已生成: $OUTPUT_ISO"
-    info "可以随时手动启动:"
-    info "  qemu-system-x86_64 -cdrom $OUTPUT_ISO -m $QEMU_MEM"
+    if [ "$USE_DISK" = true ]; then
+        info "虚拟硬盘: $DISK_FILE"
+        info "可以随时手动启动:"
+        info "  qemu-system-x86_64 -cdrom $OUTPUT_ISO -drive file=$DISK_FILE,format=$DISK_FORMAT -m $QEMU_MEM"
+    else
+        info "可以随时手动启动:"
+        info "  qemu-system-x86_64 -cdrom $OUTPUT_ISO -m $QEMU_MEM"
+    fi
     info "或用此脚本启动:"
     info "  $0 -r"
     exit 0
@@ -608,14 +699,20 @@ QEMU_ARGS=()
 QEMU_ARGS+=("-m" "$QEMU_MEM")
 QEMU_ARGS+=("-smp" "$QEMU_SMP")
 
-# 显示
+# 添加硬盘（如果启用）
+if [ "$USE_DISK" = true ] && [ -f "$DISK_FILE" ]; then
+    QEMU_ARGS+=("-drive" "file=$DISK_FILE,format=$DISK_FORMAT")
+    ok "挂载虚拟硬盘: $DISK_FILE"
+fi
+
+# CD-ROM
 QEMU_ARGS+=("-cdrom" "$OUTPUT_ISO")
 
 # 网络 (用户模式)
 QEMU_ARGS+=("-netdev" "user,id=net0")
 QEMU_ARGS+=("-device" "e1000,netdev=net0")
 
-# 串口控制台
+# 显示模式：图形窗口或串口控制台
 if [ "$SERIAL_CONSOLE" = true ]; then
     QEMU_ARGS+=("-nographic")
 else
@@ -670,9 +767,14 @@ if [ "$DEBUG" = true ]; then
 fi
 
 # ---- 启动 QEMU ----
-ok "启动 QEMU (内存: $QEMU_MEM, CPU: $QEMU_SMP)"
-info "按 ${BOLD}Ctrl+A X${NC} 退出 QEMU"
-info "按 ${BOLD}Ctrl+A H${NC} 查看 QEMU 帮助"
+if [ "$SERIAL_CONSOLE" = true ]; then
+    ok "启动 QEMU (串口控制台模式, 内存: $QEMU_MEM, CPU: $QEMU_SMP)"
+    info "按 ${BOLD}Ctrl+A X${NC} 退出 QEMU"
+    info "按 ${BOLD}Ctrl+A H${NC} 查看 QEMU 帮助"
+else
+    ok "启动 QEMU (图形窗口模式, 内存: $QEMU_MEM, CPU: $QEMU_SMP)"
+    info "关闭 QEMU 窗口即可退出"
+fi
 echo ""
 
 # 捕获 Ctrl+C 以友好退出
