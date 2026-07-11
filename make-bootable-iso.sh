@@ -1,12 +1,11 @@
 #!/bin/bash
 # =============================================================================
-# make-bootable-iso.sh - 将编译好的Linux内核打包为ISO并用QEMU启动
-#                        (支持虚拟硬盘 + 自动生成 BusyBox initramfs)
+# make-bootable-iso.sh - Linux 内核一键打包启动工具
+#                        (支持编译内核 + 自动生成 BusyBox initramfs + 虚拟硬盘)
 # =============================================================================
 # 用法:
 #   ./make-bootable-iso.sh                    # 进入交互式菜单
 #   ./make-bootable-iso.sh --help             # 显示帮助
-#   或使用命令行参数直接运行
 # =============================================================================
 
 set -e
@@ -22,6 +21,7 @@ NC='\033[0m' # No Color
 WHITE='\033[1;37m'
 BG_RED='\033[41m'
 BG_GREEN='\033[42m'
+BG_YELLOW='\033[43m'
 
 # ---- 工具函数 ----
 info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
@@ -29,6 +29,7 @@ ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; }
 bold()  { echo -e "${BOLD}$*${NC}"; }
+step()  { echo -e "${BLUE}▶${NC} $*"; }
 
 # ---- 清理函数 ----
 cleanup() {
@@ -66,18 +67,149 @@ DISK_FILE="${KERNEL_SRC}/disk.qcow2"
 DISK_ONLY=false
 DISK_FORMAT="qcow2"
 
+# ---- 内核编译配置 ----
+KERNEL_CONFIG=""                    # 内核配置文件 (如: defconfig, menuconfig)
+KERNEL_JOBS=$(nproc 2>/dev/null || echo 4)  # 并行编译数
+
 # ---- 菜单模式标志 ----
 MENU_MODE=false
 
 # ---- 辅助函数: 解析大小 (支持 M, G) ----
 parse_size() {
     local input="$1"
-    # 如果是纯数字，默认单位为 M
     if [[ "$input" =~ ^[0-9]+$ ]]; then
         echo "${input}M"
     else
         echo "$input"
     fi
+}
+
+# ---- 内核编译函数 ----
+compile_kernel() {
+    echo ""
+    bold "${CYAN}═══════════ 编译 Linux 内核 ═══════════${NC}"
+    echo ""
+    
+    # 检查是否在源码目录
+    if [ ! -f "${KERNEL_SRC}/Makefile" ]; then
+        error "当前目录不是 Linux 内核源码目录"
+        info "请确保在 Linux 内核源码目录中运行"
+        return 1
+    fi
+    
+    # 显示当前配置
+    if [ -f "${KERNEL_SRC}/.config" ]; then
+        ok "检测到已有配置文件 .config"
+    else
+        warn "未检测到配置文件，将使用默认配置"
+    fi
+    
+    echo ""
+    echo "请选择编译方式:"
+    echo "  1) 使用默认配置 (make defconfig) + 编译"
+    echo "  2) 使用 menuconfig 配置 + 编译"
+    echo "  3) 使用已有 .config + 编译"
+    echo "  4) 仅编译 (不清理)"
+    echo "  5) 清理并重新编译 (make clean + make)"
+    echo "  6) 完全清理 (make mrproper)"
+    echo "  0) 返回主菜单"
+    echo ""
+    
+    read -p "请选择 [1]: " compile_choice
+    compile_choice=${compile_choice:-1}
+    
+    case "$compile_choice" in
+        0) return 0 ;;
+        1) 
+            step "使用默认配置..."
+            make -C "$KERNEL_SRC" defconfig
+            ;;
+        2)
+            step "启动 menuconfig..."
+            make -C "$KERNEL_SRC" menuconfig
+            ;;
+        3)
+            if [ ! -f "${KERNEL_SRC}/.config" ]; then
+                error "没有 .config 文件"
+                return 1
+            fi
+            ok "使用已有配置"
+            ;;
+        5)
+            step "清理旧的编译文件..."
+            make -C "$KERNEL_SRC" clean
+            ;;
+        6)
+            step "完全清理 (mrproper)..."
+            make -C "$KERNEL_SRC" mrproper
+            ok "清理完成"
+            read -p "按 Enter 继续..."
+            return 0
+            ;;
+        *)
+            error "无效选项"
+            return 1
+            ;;
+    esac
+    
+    # 询问并行编译数
+    echo ""
+    read -p "并行编译数 (默认: $KERNEL_JOBS): " input_jobs
+    if [ -n "$input_jobs" ]; then
+        KERNEL_JOBS="$input_jobs"
+    fi
+    
+    echo ""
+    info "开始编译内核 (使用 $KERNEL_JOBS 个并行任务)..."
+    echo -e "${YELLOW}这可能需要几分钟到几十分钟，请耐心等待...${NC}"
+    echo ""
+    
+    # 编译内核
+    local start_time=$(date +%s)
+    
+    if make -C "$KERNEL_SRC" -j"$KERNEL_JOBS" bzImage; then
+        local end_time=$(date +%s)
+        local elapsed=$((end_time - start_time))
+        local minutes=$((elapsed / 60))
+        local seconds=$((elapsed % 60))
+        
+        echo ""
+        ok "内核编译成功！"
+        info "用时: ${minutes}分${seconds}秒"
+        
+        if [ -f "$KERNEL_BZIMAGE" ]; then
+            local size=$(du -h "$KERNEL_BZIMAGE" | cut -f1)
+            ok "内核文件: $KERNEL_BZIMAGE ($size)"
+        fi
+        
+        # 编译模块（可选）
+        echo ""
+        read -p "是否编译内核模块? (y/N): " build_modules
+        if [[ "$build_modules" =~ ^[Yy]$ ]]; then
+            step "编译内核模块..."
+            make -C "$KERNEL_SRC" -j"$KERNEL_JOBS" modules
+            ok "内核模块编译完成"
+            
+            # 安装模块到临时目录（可选）
+            echo ""
+            read -p "是否安装模块到临时目录? (y/N): " install_modules
+            if [[ "$install_modules" =~ ^[Yy]$ ]]; then
+                local mod_dir="${KERNEL_SRC}/_modules_install"
+                mkdir -p "$mod_dir"
+                step "安装模块到 $mod_dir ..."
+                make -C "$KERNEL_SRC" modules_install INSTALL_MOD_PATH="$mod_dir"
+                ok "模块安装完成"
+                info "模块位置: $mod_dir"
+            fi
+        fi
+    else
+        error "内核编译失败！"
+        return 1
+    fi
+    
+    echo ""
+    read -p "按 Enter 继续..."
+    return 0
 }
 
 # ---- 显示菜单 ----
@@ -93,40 +225,43 @@ show_menu() {
     
     echo -e "${BOLD}当前状态:${NC}"
     if [ -f "$KERNEL_BZIMAGE" ]; then
-        echo -e "  ${GREEN}✓${NC} 内核: 已编译"
+        local size=$(du -h "$KERNEL_BZIMAGE" 2>/dev/null | cut -f1)
+        echo -e "  ${GREEN}✓${NC} 内核: 已编译 (${size})"
     else
         echo -e "  ${RED}✗${NC} 内核: 未编译"
     fi
     if [ -f "$OUTPUT_ISO" ]; then
-        ISO_SIZE=$(du -h "$OUTPUT_ISO" 2>/dev/null | cut -f1)
-        echo -e "  ${GREEN}✓${NC} ISO: 已生成 (${ISO_SIZE})"
+        local size=$(du -h "$OUTPUT_ISO" 2>/dev/null | cut -f1)
+        echo -e "  ${GREEN}✓${NC} ISO: 已生成 (${size})"
     else
         echo -e "  ${YELLOW}○${NC} ISO: 未生成"
     fi
     if [ -f "$DISK_FILE" ]; then
-        DISK_SIZE_ACTUAL=$(du -h "$DISK_FILE" 2>/dev/null | cut -f1)
-        echo -e "  ${GREEN}✓${NC} 硬盘: 已创建 (${DISK_SIZE_ACTUAL})"
+        local size=$(du -h "$DISK_FILE" 2>/dev/null | cut -f1)
+        echo -e "  ${GREEN}✓${NC} 硬盘: 已创建 (${size})"
     else
         echo -e "  ${YELLOW}○${NC} 硬盘: 未创建"
     fi
+    echo -e "  ${CYAN}ℹ${NC}  CPU: $KERNEL_JOBS 核可用"
     echo ""
     
     echo -e "${BOLD}请选择操作:${NC}"
     echo ""
-    echo -e "  ${GREEN}1${NC}) 构建 ISO 并启动 (自动生成 initramfs)"
-    echo -e "  ${GREEN}2${NC}) 构建 ISO + 创建硬盘并启动"
-    echo -e "  ${GREEN}3${NC}) 构建 ISO + 使用已有硬盘启动"
-    echo -e "  ${GREEN}4${NC}) 仅构建 ISO (不启动 QEMU)"
-    echo -e "  ${GREEN}5${NC}) 仅创建虚拟硬盘"
-    echo -e "  ${GREEN}6${NC}) 运行已有的 ISO"
-    echo -e "  ${GREEN}7${NC}) 高级设置"
-    echo -e "  ${GREEN}8${NC}) 查看文件状态"
-    echo -e "  ${RED}0${NC}) 退出"
+    echo -e "  ${GREEN}1${NC}) 🔨 编译内核"
+    echo -e "  ${GREEN}2${NC}) 📦 构建 ISO 并启动"
+    echo -e "  ${GREEN}3${NC}) 💾 构建 ISO + 创建硬盘并启动"
+    echo -e "  ${GREEN}4${NC}) 💾 构建 ISO + 使用已有硬盘启动"
+    echo -e "  ${GREEN}5${NC}) 📀 仅构建 ISO (不启动)"
+    echo -e "  ${GREEN}6${NC}) 💾 仅创建虚拟硬盘"
+    echo -e "  ${GREEN}7${NC}) ▶️  运行已有的 ISO"
+    echo -e "  ${GREEN}8${NC}) ⚙️  高级设置"
+    echo -e "  ${GREEN}9${NC}) 📊 查看文件状态"
+    echo -e "  ${RED}0${NC}) 🚪 退出"
     echo ""
 }
 
 # =============================================================================
-# 核心函数 - 直接执行操作，不调用自身
+# 核心函数
 # =============================================================================
 
 # 构建 ISO (通用函数)
@@ -146,7 +281,10 @@ build_iso() {
     # 检查内核
     if [ ! -f "$KERNEL_BZIMAGE" ]; then
         error "未找到内核文件: $KERNEL_BZIMAGE"
-        info "请先编译内核: make -j\$(nproc)"
+        echo ""
+        info "请先编译内核:"
+        echo "  选择菜单选项 ${GREEN}1${NC} 编译内核"
+        echo "  或手动执行: make -j\$(nproc)"
         return 1
     fi
     
@@ -166,7 +304,7 @@ build_iso() {
     if [ -n "$INITRAMFS" ] && [ -f "$INITRAMFS" ]; then
         initramfs_file="$INITRAMFS"
     elif [ -f "${KERNEL_SRC}/usr/initramfs_data.cpio" ]; then
-        cpio_size=$(stat -c%s "${KERNEL_SRC}/usr/initramfs_data.cpio" 2>/dev/null || echo 0)
+        local cpio_size=$(stat -c%s "${KERNEL_SRC}/usr/initramfs_data.cpio" 2>/dev/null || echo 0)
         if [ "$cpio_size" -gt 1024 ]; then
             initramfs_file="${KERNEL_SRC}/usr/initramfs_data.cpio"
             ok "使用内核内置 initramfs"
@@ -289,7 +427,6 @@ GRUB_EOF
     
     # UEFI 模式
     if [ "$USE_EFI" = true ]; then
-        # 创建 EFI 启动文件
         EFI_BINARY="${TEMP_DIR}/BOOTx64.EFI"
         if command -v grub-mkstandalone &>/dev/null; then
             grub-mkstandalone -O x86_64-efi -o "$EFI_BINARY" -p "/boot/grub" \
@@ -385,6 +522,10 @@ run_qemu() {
 }
 
 # ---- 菜单选项函数 ----
+menu_compile_kernel() {
+    compile_kernel
+}
+
 menu_build_iso() {
     echo -e "${CYAN}[执行]${NC} 构建 ISO 并启动"
     echo ""
@@ -536,6 +677,7 @@ menu_advanced() {
     echo "当前设置:"
     echo "  内存: $QEMU_MEM"
     echo "  CPU 核心: $QEMU_SMP"
+    echo "  编译并行数: $KERNEL_JOBS"
     echo "  启动模式: $([ "$SERIAL_CONSOLE" = true ] && echo "串口控制台" || echo "图形窗口")"
     echo "  自动生成 initramfs: $([ "$AUTO_INITRD" = true ] && echo "开启" || echo "关闭")"
     echo "  KVM 加速: $([ "$NO_KVM" = false ] && echo "开启" || echo "关闭")"
@@ -543,10 +685,11 @@ menu_advanced() {
     echo ""
     echo "  a) 修改内存大小 (当前: $QEMU_MEM)"
     echo "  b) 修改 CPU 核心数 (当前: $QEMU_SMP)"
-    echo "  c) 切换启动模式"
-    echo "  d) 切换 KVM 加速"
-    echo "  e) 切换 EFI/UEFI"
-    echo "  f) 切换自动生成 initramfs"
+    echo "  c) 修改编译并行数 (当前: $KERNEL_JOBS)"
+    echo "  d) 切换启动模式 (图形/串口)"
+    echo "  e) 切换 KVM 加速"
+    echo "  f) 切换 EFI/UEFI"
+    echo "  g) 切换自动生成 initramfs"
     echo "  0) 返回主菜单"
     echo ""
     read -p "请选择: " adv_choice
@@ -569,21 +712,29 @@ menu_advanced() {
             read -p "按 Enter 继续..."
             ;;
         c|C)
+            read -p "输入编译并行数 (如: 2, 4, 8): " new_jobs
+            if [ -n "$new_jobs" ]; then
+                KERNEL_JOBS="$new_jobs"
+                echo -e "${GREEN}已设置编译并行数为: $KERNEL_JOBS${NC}"
+            fi
+            read -p "按 Enter 继续..."
+            ;;
+        d|D)
             SERIAL_CONSOLE=$([ "$SERIAL_CONSOLE" = true ] && echo false || echo true)
             echo -e "${GREEN}切换到: $([ "$SERIAL_CONSOLE" = true ] && echo "串口控制台" || echo "图形窗口")${NC}"
             read -p "按 Enter 继续..."
             ;;
-        d|D)
+        e|E)
             NO_KVM=$([ "$NO_KVM" = false ] && echo true || echo false)
             echo -e "${GREEN}KVM 加速: $([ "$NO_KVM" = false ] && echo "开启" || echo "关闭")${NC}"
             read -p "按 Enter 继续..."
             ;;
-        e|E)
+        f|F)
             USE_EFI=$([ "$USE_EFI" = true ] && echo false || echo true)
             echo -e "${GREEN}切换到: $([ "$USE_EFI" = true ] && echo "UEFI" || echo "BIOS")${NC}"
             read -p "按 Enter 继续..."
             ;;
-        f|F)
+        g|G)
             AUTO_INITRD=$([ "$AUTO_INITRD" = true ] && echo false || echo true)
             echo -e "${GREEN}自动生成 initramfs: $([ "$AUTO_INITRD" = true ] && echo "开启" || echo "关闭")${NC}"
             read -p "按 Enter 继续..."
@@ -600,18 +751,18 @@ menu_status() {
     
     echo -e "${BOLD}内核:${NC}"
     if [ -f "$KERNEL_BZIMAGE" ]; then
-        SIZE=$(du -h "$KERNEL_BZIMAGE" | cut -f1)
-        echo -e "  ${GREEN}✓${NC} $KERNEL_BZIMAGE ($SIZE)"
+        local size=$(du -h "$KERNEL_BZIMAGE" | cut -f1)
+        echo -e "  ${GREEN}✓${NC} $KERNEL_BZIMAGE ($size)"
     else
         echo -e "  ${RED}✗${NC} 未找到内核文件"
-        echo "    请先编译: make -j\$(nproc)"
+        echo "    请选择菜单选项 1 编译内核"
     fi
     echo ""
     
     echo -e "${BOLD}ISO 文件:${NC}"
     if [ -f "$OUTPUT_ISO" ]; then
-        SIZE=$(du -h "$OUTPUT_ISO" | cut -f1)
-        echo -e "  ${GREEN}✓${NC} $OUTPUT_ISO ($SIZE)"
+        local size=$(du -h "$OUTPUT_ISO" | cut -f1)
+        echo -e "  ${GREEN}✓${NC} $OUTPUT_ISO ($size)"
     else
         echo -e "  ${YELLOW}○${NC} 未生成 ISO"
     fi
@@ -619,21 +770,30 @@ menu_status() {
     
     echo -e "${BOLD}虚拟硬盘:${NC}"
     if [ -f "$DISK_FILE" ]; then
-        SIZE=$(du -h "$DISK_FILE" | cut -f1)
-        echo -e "  ${GREEN}✓${NC} $DISK_FILE ($SIZE)"
+        local size=$(du -h "$DISK_FILE" | cut -f1)
+        echo -e "  ${GREEN}✓${NC} $DISK_FILE ($size)"
     else
         echo -e "  ${YELLOW}○${NC} 未创建虚拟硬盘"
     fi
     echo ""
     
     echo -e "${BOLD}依赖检查:${NC}"
-    for cmd in xorriso grub-mkimage qemu-system-x86_64 qemu-img busybox cpio; do
+    local deps=("xorriso" "grub-mkimage" "qemu-system-x86_64" "qemu-img" "busybox" "cpio" "make" "gcc")
+    for cmd in "${deps[@]}"; do
         if command -v "$cmd" &>/dev/null; then
             echo -e "  ${GREEN}✓${NC} $cmd"
         else
             echo -e "  ${RED}✗${NC} $cmd"
         fi
     done
+    echo ""
+    
+    echo -e "${BOLD}内核配置:${NC}"
+    if [ -f "${KERNEL_SRC}/.config" ]; then
+        echo -e "  ${GREEN}✓${NC} 已配置 (.config 存在)"
+    else
+        echo -e "  ${YELLOW}○${NC} 未配置"
+    fi
     echo ""
     
     read -p "按 Enter 返回菜单..."
@@ -739,16 +899,17 @@ done
 if [ "$MENU_MODE" = true ]; then
     while true; do
         show_menu
-        read -p "请输入选项 [0-8]: " choice
+        read -p "请输入选项 [0-9]: " choice
         case "$choice" in
-            1) menu_build_iso ;;
-            2) menu_build_with_disk ;;
-            3) menu_build_with_existing_disk ;;
-            4) menu_build_iso_only ;;
-            5) menu_create_disk ;;
-            6) menu_run_iso ;;
-            7) menu_advanced ;;
-            8) menu_status ;;
+            1) menu_compile_kernel ;;
+            2) menu_build_iso ;;
+            3) menu_build_with_disk ;;
+            4) menu_build_with_existing_disk ;;
+            5) menu_build_iso_only ;;
+            6) menu_create_disk ;;
+            7) menu_run_iso ;;
+            8) menu_advanced ;;
+            9) menu_status ;;
             0) 
                 echo -e "${GREEN}再见！${NC}"
                 exit 0 
