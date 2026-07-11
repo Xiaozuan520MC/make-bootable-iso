@@ -43,20 +43,18 @@
 
 ### 1. 下载脚本
 
-将 `make-bootable-iso.sh` 放入 Linux 内核源码目录：
+将 `make-bootable-iso.sh` 放入 Linux 内核源码目录
 
-```bash
-cp make-bootable-iso.sh /path/to/linux-source/
-cd /path/to/linux-source
-chmod +x make-bootable-iso.sh
 2. 安装依赖
 Ubuntu / Debian
-bash
+```bash
 sudo apt update
 sudo apt install xorriso grub-pc-bin grub-efi-amd64-bin \
                  qemu-system-x86 qemu-utils \
                  mtools dosfstools busybox-static cpio \
                  build-essential bc bison flex libssl-dev
+```
+
 依赖说明
 依赖	用途
 xorriso	生成 ISO 镜像
@@ -71,6 +69,7 @@ dosfstools	UEFI 模式支持
 build-essential	编译内核所需 (gcc, make 等)
 bc, bison, flex	内核编译依赖
 libssl-dev	内核编译依赖 (OpenSSL)
+
 🚀 快速开始
 bash
 # 进入交互式菜单
@@ -82,6 +81,7 @@ bash make-bootable-iso.sh
 3. 选择配置方式 (推荐: 1 = defconfig)
 4. 等待编译完成
 5. 选择 2 或 3 → 构建 ISO 并启动
+
 📖 使用指南
 交互式菜单选项
 选项	功能	说明
@@ -95,6 +95,7 @@ bash make-bootable-iso.sh
 8	⚙️ 高级设置	内存/CPU/启动模式等
 9	📊 查看文件状态	查看所有文件状态
 0	🚪 退出	退出程序
+
 编译内核子菜单
 选项	功能
 1	使用默认配置 + 编译 (make defconfig)
