@@ -5,7 +5,6 @@
 ## ✨ 特性
 
 - 🔨 **一键编译内核** - 集成 make defconfig/menuconfig + 编译
-- 📦 **自动打包 ISO** - 将内核 `bzImage` 打包成可启动 ISO
 - 🐚 **自动生成 initramfs** - 无需手动制作，自动生成 BusyBox initramfs
 - 💾 **虚拟硬盘支持** - 自动创建和管理 qcow2 虚拟硬盘（支持 MB/GB 单位）
 - 🖥️ **图形界面支持** - 默认使用 VGA 图形窗口，也可切换串口控制台
@@ -31,22 +30,6 @@ sudo apt install xorriso grub-pc-bin grub-efi-amd64-bin \
                  mtools dosfstools busybox-static cpio \
                  build-essential bc bison flex libssl-dev
 ```
-
-依赖说明
-依赖	用途
-xorriso	生成 ISO 镜像
-grub-pc-bin	GRUB BIOS 启动支持
-grub-efi-amd64-bin	GRUB UEFI 启动支持
-qemu-system-x86	QEMU 虚拟机
-qemu-utils	qemu-img (创建虚拟硬盘)
-busybox-static	自动生成 initramfs
-cpio	打包 initramfs
-mtools	UEFI 模式支持
-dosfstools	UEFI 模式支持
-build-essential	编译内核所需 (gcc, make 等)
-bc, bison, flex	内核编译依赖
-libssl-dev	内核编译依赖 (OpenSSL)
-
 🚀 快速开始
 bash
 # 进入交互式菜单
@@ -62,16 +45,12 @@ bash make-bootable-iso.sh
 📖 使用指南
 交互式菜单选项
 选项	功能	说明
-1	🔨 编译内核	进入内核编译子菜单
-2	📦 构建 ISO 并启动	自动生成 initramfs，启动 QEMU
-3	💾 构建 ISO + 创建硬盘并启动	创建虚拟硬盘并启动
-4	💾 构建 ISO + 使用已有硬盘启动	使用已有硬盘启动
-5	📀 仅构建 ISO	只生成 ISO，不启动
-6	💾 仅创建虚拟硬盘	只创建硬盘文件
-7	▶️ 运行已有的 ISO	直接启动 ISO
-8	⚙️ 高级设置	内存/CPU/启动模式等
-9	📊 查看文件状态	查看所有文件状态
-0	🚪 退出	退出程序
+  1) 🔨 编译内核
+  2) 🚀 启动 (图形模式)
+  3) 🚀 启动 (终端串口模式)
+  4) 🔧 重新生成 initramfs
+  5) ⚙️  高级设置
+  0) 🚪 退出
 
 编译内核子菜单
 选项	功能
